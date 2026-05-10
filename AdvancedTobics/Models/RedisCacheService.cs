@@ -1,15 +1,15 @@
-﻿using StackExchange.Redis;
+using StackExchange.Redis;
 using System.Text.Json;
 
 namespace AdvancedTobics.Models
 {
     public class RedisCacheService
     {
-        private readonly IDatabase _database;
+        private readonly IConnectionMultiplexer _redis;
 
         public RedisCacheService(IConnectionMultiplexer redis)
         {
-            _database = redis.GetDatabase();
+            _redis = redis;
         }
 
         public async Task SetDataAsync<T>(
@@ -17,27 +17,67 @@ namespace AdvancedTobics.Models
             T data,
             TimeSpan? expiry = null)
         {
-            var jsonData = JsonSerializer.Serialize(data);
+            if (!_redis.IsConnected) return;
 
-            await _database.StringSetAsync(
-                key,
-                jsonData,
-                (Expiration)expiry);
+            try
+            {
+                var database = _redis.GetDatabase();
+                var jsonData = JsonSerializer.Serialize(data);
+
+                await database.StringSetAsync(
+                    key,
+                    jsonData,
+                    expiry: expiry.HasValue ? (Expiration)expiry.Value : default);
+            }
+            catch (RedisConnectionException)
+            {
+                // Redis is down/unreachable; treat cache as best-effort
+            }
+            catch (RedisTimeoutException)
+            {
+                // Redis is slow/unreachable; treat cache as best-effort
+            }
         }
 
         public async Task<T?> GetDataAsync<T>(string key)
         {
-            var value = await _database.StringGetAsync(key);
+            if (!_redis.IsConnected) return default;
 
-            if (value.IsNullOrEmpty)
+            try
+            {
+                var database = _redis.GetDatabase();
+                var value = await database.StringGetAsync(key);
+
+                if (value.IsNullOrEmpty)
+                    return default;
+
+                return JsonSerializer.Deserialize<T>(value!);
+            }
+            catch (RedisConnectionException)
+            {
                 return default;
-
-            return JsonSerializer.Deserialize<T>(value!);
+            }
+            catch (RedisTimeoutException)
+            {
+                return default;
+            }
         }
 
         public async Task RemoveDataAsync(string key)
         {
-            await _database.KeyDeleteAsync(key);
+            if (!_redis.IsConnected) return;
+
+            try
+            {
+                var database = _redis.GetDatabase();
+                await database.KeyDeleteAsync(key);
+            }
+            catch (RedisConnectionException)
+            {
+            }
+            catch (RedisTimeoutException)
+            {
+            }
         }
     }
 }
